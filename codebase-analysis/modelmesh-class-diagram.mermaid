@@ -1,0 +1,236 @@
+```mermaid
+classDiagram
+    %% Core Abstract Classes and Base Types
+    class ModelMesh {
+        <<abstract>>
+        -ModelLoader loader
+        -VModelManager vModelManager
+        -Metrics metrics
+        -ExecutorService loadingPool
+        -ConcurrentLinkedHashMap modelCache
+        -KVTable instanceTable
+        -KVTable modelTable
+        +initialize()
+        +shutdown()
+        +ensureLoaded(String modelId)
+        +invokeModel(String modelId, ByteBuffer input)
+        +addModel(ModelInfo modelInfo)
+        +deleteModel(String modelId)
+    }
+
+    class ModelLoader {
+        <<abstract>>
+        +loadModel(ModelInfo modelInfo)
+        +unloadModel(String modelId)
+        +getModelSize(ModelInfo modelInfo)
+        +predictModelSize(ModelInfo modelInfo)
+    }
+
+    %% Core Implementation Classes
+    class SidecarModelMesh {
+        -ModelRuntimeGrpc runtimeClient
+        -ManagedChannel runtimeChannel
+        -PayloadProcessor payloadProcessor
+        +loadModel(LoadModelRequest request)
+        +unloadModel(UnloadModelRequest request)
+        +invokeModel(String modelId, ByteBuffer input)
+        +applyModel(String modelId, ByteBuffer input, Map metadata)
+    }
+
+    class ModelMeshApi {
+        -ModelMesh modelMesh
+        -ListeningExecutorService grpcCallbackExecutor
+        +registerModel(RegisterModelRequest)
+        +unregisterModel(UnregisterModelRequest)
+        +ensureLoaded(EnsureLoadedRequest)
+        +getModelStatus(GetStatusRequest)
+    }
+
+    class VModelManager {
+        -ModelMesh modelMesh
+        -KVTable vModelTable
+        -ExecutorService executor
+        +setVModel(SetVModelRequest)
+        +deleteVModel(String vModelId)
+        +getVModelStatus(String vModelId)
+        +listVModels()
+    }
+
+    %% Data Records and Structures
+    class InstanceRecord {
+        <<KVRecord>>
+        -long lruTime
+        -int count
+        -long capacity
+        -long used
+        -int loadingThreads
+        -int loadingInProgress
+        -ProhibitedTypeSet prohibitedTypes
+        +getCapacity() long
+        +getUsed() long
+        +getLoadingInProgress() int
+    }
+
+    class ModelRecord {
+        <<KVRecord>>
+        -String type
+        -long loadTime
+        -long lastUsed
+        -long size
+        -Map loadFailures
+        +getSize() long
+        +getLastUsed() long
+        +getLoadFailures() Map
+    }
+
+    class VModelRecord {
+        <<KVRecord>>
+        -String owner
+        -String activeModel
+        -String targetModel
+        -boolean targetLoadFailed
+        +getActiveModel() String
+        +getTargetModel() String
+    }
+
+    %% Type Constraints and Management
+    class TypeConstraintManager {
+        +calculatePlacement(String modelType, ClusterStats stats)
+        +isTypeSupported(String modelType, InstanceRecord instance)
+        +updateConstraints(Map constraints)
+        +getProhibitedTypes(String instanceId) ProhibitedTypeSet
+    }
+
+    class ProhibitedTypeSet {
+        <<inner class>>
+        -Set prohibited
+        -boolean allowAll
+        +isAllowed(String modelType) boolean
+    }
+
+    %% Service Interfaces (Thrift-based)
+    interface BaseModelMeshServiceIface {
+        <<interface>>
+        +internalOperation(String modelId, boolean getStatus, boolean load, boolean sync, long lastUsed, List excludeInstances) StatusInfo
+    }
+
+    interface ModelMeshServiceIface {
+        <<interface>>
+        +applyModel(String modelId, ByteBuffer input, Map metadata) ByteBuffer
+        +applyModelMulti(String modelId, List input, Map metadata) List
+    }
+
+    %% Payload Processing Layer
+    interface PayloadProcessor {
+        <<interface>>
+        +getName() String
+        +mayTakeOwnership() boolean
+        +process(Payload payload) boolean
+        +close()
+    }
+
+    class CompositePayloadProcessor {
+        -List processors
+        +process(Payload payload) boolean
+    }
+
+    class LoggingPayloadProcessor {
+        -Logger logger
+        +process(Payload payload) boolean
+    }
+
+    class AsyncPayloadProcessor {
+        -ExecutorService executor
+        +process(Payload payload) boolean
+    }
+
+    class RemotePayloadProcessor {
+        -String remoteEndpoint
+        +process(Payload payload) boolean
+    }
+
+    class Payload {
+        -String modelId
+        -String method
+        -ByteBuffer data
+        -Map headers
+        +getModelId() String
+        +getData() ByteBuffer
+    }
+
+    %% Metrics and Monitoring
+    interface Metrics {
+        <<interface>>
+        +isPerModelMetricsEnabled() boolean
+        +logTimingMetricDuration(String name, long durationNanos)
+        +incrementCounter(String name, String... labels)
+        +recordHistogram(String name, double value, String... labels)
+        +close()
+    }
+
+    class PrometheusMetrics {
+        -CollectorRegistry registry
+        -NettyServer server
+        -Map counters
+        -Map histograms
+        -Map gauges
+    }
+
+    %% Generated gRPC Services
+    class ModelMeshGrpcImplBase {
+        <<generated>>
+        <<abstract>>
+        +registerModel(RegisterModelRequest, StreamObserver)
+        +unregisterModel(UnregisterModelRequest, StreamObserver)
+        +ensureLoaded(EnsureLoadedRequest, StreamObserver)
+    }
+
+    %% Key Relationships
+    SidecarModelMesh --|> ModelMesh : extends
+    SidecarModelMesh ..|> ModelMeshServiceIface : implements
+    ModelMesh ..|> BaseModelMeshServiceIface : implements
+    ModelMeshApi --|> ModelMeshGrpcImplBase : extends
+    
+    %% Composition relationships
+    ModelMesh --* ModelLoader : contains
+    ModelMesh --* VModelManager : contains
+    ModelMesh --* Metrics : contains
+    ModelMesh --* TypeConstraintManager : contains
+    SidecarModelMesh --* PayloadProcessor : contains
+    ModelMeshApi --* ModelMesh : delegates to
+    VModelManager --* ModelMesh : back-reference
+
+    %% Data structure relationships  
+    ModelMesh --> InstanceRecord : manages
+    ModelMesh --> ModelRecord : manages
+    VModelManager --> VModelRecord : manages
+    TypeConstraintManager --> ProhibitedTypeSet : creates
+    InstanceRecord --> ProhibitedTypeSet : contains
+
+    %% Service interface hierarchy
+    ModelMeshServiceIface --|> BaseModelMeshServiceIface : extends
+
+    %% Payload processing relationships
+    PayloadProcessor <|.. CompositePayloadProcessor : implements
+    PayloadProcessor <|.. LoggingPayloadProcessor : implements
+    PayloadProcessor <|.. AsyncPayloadProcessor : implements
+    PayloadProcessor <|.. RemotePayloadProcessor : implements
+    CompositePayloadProcessor --* PayloadProcessor : delegates to
+    PayloadProcessor --> Payload : processes
+
+    %% Metrics implementation
+    Metrics <|.. PrometheusMetrics : implements
+    ModelMesh --> Metrics : uses
+    
+    %% External dependencies (key ones only)
+    ModelMesh --> KVTable : uses for coordination
+    ModelMesh --> ConcurrentLinkedHashMap : uses for caching
+    SidecarModelMesh --> ModelRuntimeGrpc : communicates with runtime
+
+    %% Notes about architecture layers
+    note for ModelMesh "Core orchestration layer\nManages model lifecycle and routing"
+    note for SidecarModelMesh "Kubernetes sidecar implementation\nHandles gRPC communication with model runtimes"
+    note for PayloadProcessor "Extensible request/response processing\nSupports logging, async processing, etc."
+    note for VModelManager "Virtual model management\nMaps virtual model IDs to actual models"
+    note for TypeConstraintManager "Heterogeneous cluster support\nManages model type placement constraints"
+```

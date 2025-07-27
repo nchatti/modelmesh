@@ -1,0 +1,100 @@
+```mermaid
+flowchart TD
+    %% External Entry Point
+    Client[Client Application] -->|registerModel Request| API[ModelMeshApi.registerModel]
+    
+    %% API Layer Processing
+    API --> Validate{Validate Request}
+    Validate -->|Invalid| ErrorResp[Return Error Response]
+    Validate -->|Valid| Extract[Extract ModelInfo & Parameters]
+    
+    %% Core Registration Flow
+    Extract --> CoreReg[ModelMesh.registerModel]
+    CoreReg --> CheckReadOnly{Check Read-Only Mode}
+    CheckReadOnly -->|Read-Only| ReadOnlyErr[Throw Exception]
+    CheckReadOnly -->|Writable| RegFlow[Registry Operations]
+    
+    %% Registry Operations with Retry Loop
+    RegFlow --> RegCheck{Check Model Exists}
+    RegCheck -->|Exists| ValidateAttrs{Validate Attributes}
+    ValidateAttrs -->|Mismatch| AttrErr[Throw InvalidInputException]
+    ValidateAttrs -->|Match| UpdateTime[Update LastUsed Time]
+    
+    RegCheck -->|New Model| CreateRecord[Create ModelRecord]
+    CreateRecord --> AtomicSet[registry.conditionalSetAndGet]
+    AtomicSet -->|Conflict| RegFlow
+    AtomicSet -->|Success| LogCreate[Log 'Added new model']
+    
+    %% Decision Point for Loading
+    UpdateTime --> LoadDecision{loadNow = true?}
+    LogCreate --> LoadDecision
+    LoadDecision -->|No| RegComplete[Registration Complete]
+    LoadDecision -->|Yes| EnsureLoaded[ensureLoaded]
+    
+    %% Model Loading Flow
+    EnsureLoaded --> InternalOp[internalOperation]
+    InternalOp --> InvokeModel[invokeModel - Main Routing]
+    InvokeModel --> CacheCheck{Local Cache Check}
+    
+    CacheCheck -->|Hit| LocalExec[Execute Locally]
+    CacheCheck -->|Miss| LoadBalance[Load Balancing Logic]
+    
+    LoadBalance --> PlacementOrder[PLACEMENT_ORDER Algorithm]
+    PlacementOrder --> SelectInstance{Select Best Instance}
+    
+    SelectInstance -->|Local Instance| LocalLoad[Trigger Local Load]
+    SelectInstance -->|Remote Instance| ForwardReq[Forward to Remote Instance]
+    
+    %% Local Loading Process
+    LocalLoad --> CheckCapacity{Check Cache Capacity}
+    CheckCapacity -->|No Space| EvictModels[Evict LRU Models]
+    CheckCapacity -->|Space Available| LoadQueue[Add to Loading Queue]
+    EvictModels --> LoadQueue
+    
+    LoadQueue --> TypeLoader[ModelLoader.loadRuntime]
+    TypeLoader --> RuntimeLoad[Load in Model Runtime]
+    RuntimeLoad -->|Success| UpdateCache[Update Local Cache]
+    RuntimeLoad -->|Failure| LoadFailure[Record Load Failure]
+    
+    UpdateCache --> UpdateRegistry[Update ModelRecord in Registry]
+    UpdateRegistry --> SyncDecision{sync = true?}
+    
+    %% Response Handling
+    SyncDecision -->|Yes| WaitComplete[Wait for Load Complete]
+    SyncDecision -->|No| AsyncResp[Return Async Response]
+    WaitComplete --> FinalResp[Return Final Response]
+    AsyncResp --> FinalResp
+    LocalExec --> FinalResp
+    ForwardReq --> FinalResp
+    RegComplete --> FinalResp
+    LoadFailure --> FailResp[Return Failure Response]
+    
+    %% Distributed Coordination
+    subgraph "Distributed Storage"
+        Registry[(Registry\nKV Store\netcd/ZooKeeper)]
+        LocalCache[(Local Cache\nLRU)]
+    end
+    
+    subgraph "Model Runtime"
+        Runtime[External Model Runtime\nTriton/TorchServe/etc]
+    end
+    
+    %% Storage Connections
+    AtomicSet -.-> Registry
+    UpdateRegistry -.-> Registry
+    UpdateCache -.-> LocalCache
+    RuntimeLoad -.-> Runtime
+    
+    %% Styling
+    classDef entryPoint fill:#e1f5fe
+    classDef processing fill:#f3e5f5
+    classDef decision fill:#fff3e0
+    classDef storage fill:#e8f5e8
+    classDef error fill:#ffebee
+    
+    class Client,API entryPoint
+    class CoreReg,Extract,RegFlow,CreateRecord,EnsureLoaded processing
+    class Validate,CheckReadOnly,RegCheck,ValidateAttrs,LoadDecision,CacheCheck,SelectInstance decision
+    class Registry,LocalCache,Runtime storage
+    class ErrorResp,ReadOnlyErr,AttrErr,LoadFailure,FailResp error
+```
