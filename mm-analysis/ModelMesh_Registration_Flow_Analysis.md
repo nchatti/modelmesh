@@ -6,115 +6,43 @@ This document analyzes the model registration flow in ModelMesh, tracing the com
 
 ## Registration Flow Sequence Diagram
 
+### Simplified View - Nominal Scenario
+
 ```mermaid
 sequenceDiagram
     participant Client as External Client
-    participant API as ModelMeshApi (gRPC)
-    participant SMM as SidecarModelMesh
-    participant MM as ModelMesh
-    participant Registry as KV Registry (etcd)
-    participant Cache as Local Cache
+    participant API as ModelMesh API
+    participant Core as ModelMesh Core
+    participant Registry as Model Registry
     participant Runtime as Model Runtime
 
     Note over Client,Runtime: Model Registration Flow
 
-    Client->>+API: registerModel(RegisterModelRequest)
-    Note right of API: Contains: modelId, ModelInfo, loadNow, sync, lastUsedTime
+    Client->>+API: registerModel(modelId, modelInfo, loadNow)
+    API->>API: Validate request parameters
     
-    API->>API: validateModelId(modelId)
-    alt Invalid Model ID
-        API-->>Client: StatusException(INVALID_ARGUMENT)
-    end
+    API->>+Core: Process registration
+    Core->>+Registry: Check if model exists
+    Registry-->>-Core: Model status
     
-    API->>API: Convert gRPC ModelInfo to Thrift ModelInfo
-    Note right of API: Extract: type, path, encKey from request
-    
-    alt loadNow = true
-        API->>API: setUnbalancedLitelinksContextParam()
-        alt sync = true
-            API->>API: newInterruptingListener()
-        end
-    end
-    
-    API->>+SMM: delegate.registerModel(modelId, modelInfo, loadNow, sync, lastUsedTime)
-    SMM->>+MM: registerModel(modelId, modelInfo, loadNow, sync, lastUsedTime)
-    
-    MM->>MM: validateNewModelType(modelInfo.serviceType)
-    MM->>MM: Calculate lastUsedTimestamp
-    Note right of MM: Uses current time minus age factor based on loadNow
-    
-    MM->>+Registry: registry.get(modelId)
-    Registry-->>-MM: ModelRecord (if exists)
-    
-    alt Model exists
-        MM->>+Registry: registry.getConsistent(modelId)
-        Registry-->>-MM: Latest ModelRecord
-        
-        MM->>MM: Check model attributes consistency
-        alt Attributes differ (type, path, encKey)
-            MM-->>SMM: InvalidInputException("Model already exists with different attributes")
-            SMM-->>API: Exception
-            API-->>Client: StatusException(INVALID_ARGUMENT)
-        end
-        
-        alt !loadNow && timestamp > lastUsed + threshold
-            MM->>MM: mr.updateLastUsed(lastUsedTimestamp)
-            MM->>+Registry: registry.conditionalSetAndGet(modelId, mr)
-            Registry-->>-MM: ModelRecord (updated or conflicting)
-        end
-        
-        Note right of MM: weCreated = false
-        
-    else Model doesn't exist
-        alt readOnlyMode
-            MM-->>SMM: InternalException("read-only mode")
-            SMM-->>API: Exception
-            API-->>Client: StatusException(INTERNAL)
-        end
-        
-        MM->>MM: new ModelRecord(type, encKey, modelPath, false)
-        MM->>MM: mr.setLastUsed(lastUsedTimestamp)
-        MM->>+Registry: registry.conditionalSetAndGet(modelId, mr)
-        Registry-->>-MM: ModelRecord (created or conflicting)
-        
-        Note right of MM: weCreated = true
-        Note right of MM: Log: "Added new model to registry"
+    alt New Model
+        Core->>+Registry: Store ModelRecord
+        Registry-->>-Core: Stored successfully
+        Note right of Core: Model metadata persisted
+    else Existing Model
+        Core->>Core: Validate attributes match
+        Core->>Registry: Update lastUsed timestamp
     end
     
     alt loadNow = true
-        MM->>+MM: ensureLoaded(modelId, lastUsedTimestamp, null, sync, true)
-        
-        Note over MM,Runtime: Model Loading Sequence
-        MM->>MM: Find suitable target instance via load balancing
-        MM->>+Cache: Check if model already loaded locally
-        Cache-->>-MM: Cache status
-        
-        alt Model not in local cache
-            MM->>MM: Trigger loading via invokeModel flow
-            MM->>+Runtime: loadModel(LoadModelRequest)
-            Note right of Runtime: Contains: modelId, modelType, modelPath, modelKey
-            Runtime->>Runtime: Load model into memory
-            Runtime-->>-MM: LoadModelResponse (sizeInBytes, maxConcurrency)
-            MM->>+Cache: Store loaded model entry
-            Cache-->>-MM: Cache entry created
-        end
-        
-        MM-->>-MM: StatusInfo (LOADED/LOADING/LOADING_FAILED)
-        
-    else loadNow = false
-        alt weCreated = true
-            MM->>MM: status = SI_NOT_LOADED
-        else
-            MM->>+MM: getStatus(modelId)
-            MM-->>-MM: Current model status
-        end
+        Core->>Core: Initiate model loading
+        Core->>+Runtime: loadModel(modelInfo)
+        Runtime->>Runtime: Load model into memory
+        Runtime-->>-Core: Model loaded (size, status)
+        Note right of Core: Model ready for inference
     end
     
-    MM-->>-SMM: StatusInfo
-    SMM-->>-API: StatusInfo
-    
-    API->>API: convertStatusInfo(StatusInfo → ModelStatusInfo)
-    API->>API: respondAndComplete(response, ModelStatusInfo)
+    Core-->>-API: Registration status
     API-->>-Client: ModelStatusInfo
     
     Note over Client,Runtime: Registration Complete
