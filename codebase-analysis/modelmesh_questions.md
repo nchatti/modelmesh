@@ -387,3 +387,40 @@ ModelMesh provides **VModel-scoped ownership and access control** with these cap
 - **No authentication/authorization integration** (string-based identity only)
 - **VModel-only scope** (no ownership for concrete models or inference)
 - **Basic access model** (no roles, permissions, or hierarchies)
+
+---
+
+## Question 4: Is model placement and loading triggered by model registration or by inference request?
+
+**Answer**: Based on analysis of the ModelMesh codebase, **model placement and loading is primarily triggered by inference requests, not by model registration**.
+
+### Key Evidence
+
+#### Inference-Driven Loading
+
+**Primary Flow**: `ModelMesh.java:3407-3434` - The `invokeModel` method handles inference requests and calls `ensureLoaded` to guarantee the model is available locally or elsewhere in the cluster.
+
+**Lazy Loading Pattern**: Models are loaded on-demand when inference requests arrive, not proactively during registration.
+
+#### Model Registration vs Loading
+
+**Registration**: 
+- `ModelMesh.java:3118-3159` - The `addModel` method primarily updates the registry with model metadata
+- Registration does NOT automatically trigger loading across instances
+- Only updates `lastUsed` timestamp if `loadNow=false`
+
+**Loading Triggers**:
+1. **Inference Request** - Primary trigger via `invokeModel` → `ensureLoaded`
+2. **Explicit Load Request** - Direct calls to `ensureLoaded` 
+3. **Replication Events** - Secondary copies triggered by usage patterns
+4. **Eviction Recovery** - `ensureLoadedElsewhere` after evictions
+
+#### Key Code References
+
+- `ModelMesh.java:3224`: `ensureLoaded` method - core loading logic
+- `ModelMesh.java:3158`: In `addModel`, loading only occurs if `loadNow=true`
+- `ModelMesh.java:2517`: `ensureLoadedInternalAsync` for background replication
+
+### Conclusion
+
+ModelMesh follows a **demand-driven** approach where models remain unloaded until an actual inference request requires them. This design optimizes resource usage by avoiding unnecessary model loading and enables the distributed LRU cache to efficiently manage memory across the cluster based on actual usage patterns rather than registration events.
