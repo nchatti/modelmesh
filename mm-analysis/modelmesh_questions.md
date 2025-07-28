@@ -424,3 +424,115 @@ ModelMesh provides **VModel-scoped ownership and access control** with these cap
 ### Conclusion
 
 ModelMesh follows a **demand-driven** approach where models remain unloaded until an actual inference request requires them. This design optimizes resource usage by avoiding unnecessary model loading and enables the distributed LRU cache to efficiently manage memory across the cluster based on actual usage patterns rather than registration events.
+
+---
+
+## Question 5: Is ModelMesh using Bin-Packing algorithm for resource optimization?
+
+**Answer**: No, ModelMesh does not use traditional bin-packing algorithms for resource optimization. Instead, it implements a sophisticated **multi-criteria placement strategy** through a custom comparator.
+
+### Custom Placement Algorithm (Not Bin-Packing)
+
+**Location**: `src/main/java/com/ibm/watson/modelmesh/ModelMesh.java:4646-4703`
+
+ModelMesh uses the `PLACEMENT_ORDER` comparator which implements a multi-criteria decision process rather than classic bin-packing:
+
+```java
+static final Comparator<InstanceRecord> PLACEMENT_ORDER = (ir1, ir2) -> {
+    // 1. Shutdown status (non-shutting instances preferred)
+    boolean s1 = ir1.isShuttingDown(), s2 = ir2.isShuttingDown();
+    if (s1 != s2) return s1 ? 1 : -1;
+    
+    // 2. Version preferences (newer unless saturated)
+    long v1 = ir1.getInstanceVersion(), v2 = ir2.getInstanceVersion();
+    if (v1 != v2) {
+        // Complex version logic considering capacity fullness
+    }
+    
+    // 3. Capacity fullness (non-full instances preferred)
+    boolean f1 = ir1.isFull(), f2 = ir2.isFull();
+    if (f1 != f2) return f1 ? 1 : -1;
+    
+    // 4. LRU times for load balancing
+    // 5. Model count (fewer models preferred)
+    // 6. Remaining space (larger remaining space preferred)
+    // 7. Loading capacity and current load
+    // 8. Various tie-breaking criteria
+};
+```
+
+### Key Differences from Bin-Packing
+
+| **Traditional Bin-Packing** | **ModelMesh Placement** |
+|------------------------------|-------------------------|
+| Minimize number of bins | Optimize for performance and availability |
+| Focus on space utilization | Multi-criteria: space, load, LRU, versions |
+| Static bin sizes | Dynamic capacity with real-time updates |
+| Single optimization goal | Balanced: utilization + performance + reliability |
+
+### Multi-Criteria Optimization Strategy
+
+**Primary Criteria (in order)**:
+1. **Availability**: Non-shutting instances preferred
+2. **Version Management**: Prefer newer versions unless saturated
+3. **Capacity**: Non-full instances preferred for headroom
+4. **Load Balancing**: LRU times distribute load evenly
+5. **Space Efficiency**: Remaining space considerations
+6. **Concurrency**: Loading capacity and current operations
+
+### Resource Optimization Mechanisms
+
+#### 1. Memory-Aware Placement
+**Location**: `ModelMesh.java:4646-4703`
+```java
+// Capacity-based decisions
+boolean f1 = ir1.isFull(), f2 = ir2.isFull();
+if (f1 != f2) return f1 ? 1 : -1;
+
+// Remaining space preference
+long r1 = ir1.getRemaining(), r2 = ir2.getRemaining();
+if (r1 != r2) return Long.compare(r2, r1); // larger remaining preferred
+```
+
+#### 2. Load Distribution
+**Location**: `ModelMesh.java:4680-4690`
+```java
+// LRU-based load balancing
+long lru1 = ir1.getLruTime(), lru2 = ir2.getLruTime();
+if (lru1 != lru2) return Long.compare(lru1, lru2); // older LRU preferred
+```
+
+#### 3. Performance Optimization
+**Location**: `ModelMesh.java:4690-4700`
+```java
+// Model count preference (fewer models = better cache locality)
+int c1 = ir1.getCount(), c2 = ir2.getCount();
+if (c1 != c2) return Integer.compare(c1, c2);
+```
+
+### Why Not Traditional Bin-Packing?
+
+ModelMesh's requirements differ significantly from classic bin-packing:
+
+1. **Dynamic Environment**: Instances join/leave, models load/unload continuously
+2. **Performance Priority**: Cache locality and load distribution matter more than pure space efficiency
+3. **Availability Requirements**: Must handle failures and graceful shutdowns
+4. **Real-time Constraints**: Placement decisions must be fast, not optimal
+5. **Multi-objective**: Balances space, performance, availability, and operational concerns
+
+### Algorithmic Complexity
+
+- **Time**: O(log n) placement decisions using TreeSet with comparator
+- **Space**: O(n) for instance tracking and state management  
+- **Scalability**: Linear with cluster size, efficient for distributed environments
+
+### Summary
+
+ModelMesh uses a **custom multi-criteria placement algorithm** rather than bin-packing because:
+
+1. **Performance over Packing**: Prioritizes request latency and cache efficiency
+2. **Operational Requirements**: Handles rolling updates, failures, and maintenance
+3. **Dynamic Workloads**: Adapts to changing load patterns and cluster topology
+4. **Distributed Constraints**: Optimizes for network locality and coordination overhead
+
+The approach successfully balances resource utilization with operational requirements, providing better overall system performance than pure bin-packing would achieve in this distributed model serving context.
