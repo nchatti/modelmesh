@@ -96,7 +96,7 @@ erDiagram
     }
 
     MethodInfo {
-        repeated uint32 idInjectionPath
+        uint32[] idInjectionPath
     }
 ```
 
